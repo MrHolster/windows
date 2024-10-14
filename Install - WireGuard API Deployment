@@ -1,8 +1,8 @@
 # --------------- Variables ------------------
 $hostname = [System.Net.Dns]::GetHostName() # Get the device name
-$company = "company" # Customize this
+$company = "" # Customize this
 $user = $company
-$pass = 'password' # Customize this
+$pass = '' # Customize this
 $pair = "$($user):$($pass)"
 $encodedCreds = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes($pair))
 $basicAuthValue = "Basic $encodedCreds"
