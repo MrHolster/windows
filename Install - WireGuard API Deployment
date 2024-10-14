@@ -1,0 +1,189 @@
+# --------------- Variables ------------------
+$hostname = [System.Net.Dns]::GetHostName() # Get the device name
+$company = "company" # Customize this
+$user = $company
+$pass = 'password' # Customize this
+$pair = "$($user):$($pass)"
+$encodedCreds = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes($pair))
+$basicAuthValue = "Basic $encodedCreds"
+$Headers = @{Authorization = $basicAuthValue}
+$installedConfigPath = 'C:\Program Files\WireGuard\Data\Configurations\' + $hostname + '.conf.dpapi'
+$currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+# ------------- End of Variables --------------
+
+Write-Host "------------------Begin-----------------"
+
+function ConfigIsInstalled {
+    param (
+        $hostname
+    )
+    return Test-Path "C:\Program Files\WireGuard\Data\Configurations\$hostname.conf.dpapi"
+}
+
+function DownloadConfigFromAPI {
+    $maxRetries = 5
+    $retry = 0
+
+    while ($retry -lt $maxRetries) {
+        $retry++
+        Write-Host "Attempt #$retry to download VPN configuration file"
+        $ApiURL = "https://getwire.rationellit.se/$company/$hostname/1"
+        Invoke-RestMethod -Method Get -OutFile "C:\Program Files\WireGuard\Data\Configurations\$hostname.conf" -Uri $ApiURL -Headers $Headers
+        Start-Sleep 1
+
+        if (ConfigIsInstalled $hostname) {
+            Write-Host "VPN configuration installed successfully."
+            break
+        }
+
+        if ($retry -eq $maxRetries) {
+            Write-Host "Failed to download VPN configuration after $maxRetries attempts."
+            exit 1
+        }
+    }
+}
+
+function InstallAndStartWireGuard {
+    $url = "https://download.wireguard.com/windows-client/wireguard-amd64-0.5.3.msi"
+    $outpath = "C:\temp\WireguardInstall.exe"
+    $maxRetries = 5
+    $retry = 0
+
+    while ($retry -lt $maxRetries) {
+        $retry++
+        Write-Host "Attempt #$retry"
+
+        if (Get-Process | Where-Object { $_.Path -eq "C:\Program Files\WireGuard\wireguard.exe" }) {
+            Write-Host "WireGuard is running... success!"
+            break
+        } elseif (Test-Path 'C:\Program Files\WireGuard\wireguard.exe') {
+            Start-Process "C:\Program Files\Wireguard\wireguard.exe"
+            Write-Host "Found WireGuard and started it..."
+        } else {
+            Write-Host "WireGuard not detected, installing..."
+            Invoke-WebRequest -Uri $url -OutFile $outpath | Out-Null
+            Start-Process msiexec.exe -ArgumentList '/q', '/I', $url -Wait -NoNewWindow -PassThru | Out-Null
+            Start-Sleep 3
+            Start-Process "C:\Program Files\Wireguard\wireguard.exe"
+            Write-Host "WireGuard has been installed and started."
+            Remove-Item $outpath
+        }
+
+        if (Test-Path 'C:\Program Files\WireGuard\wireguard.exe') {
+            Write-Host "WireGuard installation and startup successful."
+            break
+        }
+
+        if ($retry -eq $maxRetries) {
+            Write-Host "Failed to install WireGuard after $maxRetries attempts."
+            exit 1
+        }
+        Start-Sleep 1
+    }
+}
+
+function IsServiceRunning 
+{
+    return $null -ne (Get-Service "WireGuardTunnel`$$hostname" -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Running' })
+}
+
+function TurnOnOffService {
+    param (
+        [Parameter(Mandatory=$true)]
+        [bool] $On
+    )
+
+    $maxRetries = 5
+    $retry = 0
+
+    while ($retry -lt $maxRetries) 
+    {
+        $retry++
+        $service = Get-Service "WireGuardTunnel`$$hostname" -ErrorAction SilentlyContinue
+
+        if (!$service -and $On) 
+        {
+            Write-Host "Attempting to start the VPN config service."
+            wireguard /installtunnelservice $installedConfigPath
+        } 
+        elseif ($service -and !$On) 
+        {
+            Write-Host "Attempting to stop the VPN config service."
+            wireguard /uninstalltunnelservice $hostname
+        }
+
+        if ($service -and $On) 
+        {
+            Write-Output "VPN config service started."
+            break
+        } 
+        elseif (!$service -and !$On) 
+        {
+            Write-Output "VPN config service stopped."
+            break
+        }
+
+        Start-Sleep 1
+        if ($retry -eq $maxRetries) 
+        {
+            Write-Host "Failed to manage the VPN service after $maxRetries attempts."
+            exit 1
+        }
+    }
+}
+
+New-Item -ItemType Directory -Force -Path C:\temp | Out-Null # Creates a directory without throwing an error if it already exists
+
+# Ensure the script is running with elevated privileges
+if ($currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) 
+{
+    Write-Host "Running as administrator, continuing as usual."
+} 
+else 
+{
+    Write-Error "Powershell must be run with administrator privileges."
+    exit 1
+}
+
+InstallAndStartWireGuard
+
+if (ConfigIsInstalled $hostname) 
+{
+    Write-Host 'VPN config is already installed.'
+    Write-Host "Deleting the old VPN config to request a new one."
+    TurnOnOffService -On $false
+
+    $retry = 0
+    $maxRetries = 5
+    while ($retry -lt $maxRetries) 
+    {
+        $retry++
+        if (Test-Path $installedConfigPath) 
+        {
+            Remove-Item $installedConfigPath
+        } 
+        else 
+        {
+            Write-Host "Removed the old VPN config."
+            break
+        }
+
+        Start-Sleep 1
+
+        if ($retry -eq $maxRetries -and (Test-Path $installedConfigPath)) 
+        {
+            Write-Host "Failed to remove the old config, exiting..."
+            exit 1
+        }
+    }
+}
+
+if (!(ConfigIsInstalled $hostname)) 
+{
+    Write-Host "Requesting VPN configuration from API..."
+    DownloadConfigFromAPI
+}
+
+$env:Path = 'C:\Program Files\WireGuard\'
+TurnOnOffService -On $true
+Write-Host "-------------------END------------------"
